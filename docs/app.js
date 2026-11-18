@@ -1,0 +1,287 @@
+'use strict';
+/*
+  냉장고 식재료 유통기한 알리미 — 처리 규칙과 화면 (docs/app.js)
+  규칙의 정본은 docs/data/RULES.md 입니다. 이 파일은 그 규칙을 코드로 옮긴 것입니다.
+  처리 순서(RULES 0번): 읽기 → 이름 정리 → 칸 검사(제외) → 중복 제거 → 정렬 → 화면
+*/
+
+/* ===== 설정: RULES.md와 같은 값 ===== */
+const DATA_URL = 'data/fridge-items.csv';
+const SOURCE_LABEL = 'fridge-items.csv · 합성 데이터';
+const COLUMNS = ['이름', '구입일', '유통기한', '가격', '비고'];
+const DAYS_BEFORE = 10; // 기준일보다 10일 넘게 이전이면 「범위 밖」
+const DAYS_AFTER = 30;  // 기준일보다 30일 넘게 이후이면 「범위 밖」
+const NO_BUY_DATE = '9999-99-99'; // 구입일이 없는 건은 정렬에서 맨 뒤
+
+/* ===== 1. 읽기: CSV 글자를 줄과 칸으로 나눈다 ===== */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  text = text.replace(/^\uFEFF/, ''); // 엑셀용 머리 표시(BOM) 제거
+  const endRow = () => {
+    row.push(field);
+    field = '';
+    if (row.some((v) => v.trim() !== '')) rows.push(row); // 빈 줄은 건너뛴다
+    row = [];
+  };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      endRow();
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== '' || row.length > 0) endRow();
+  return rows;
+}
+
+// 첫 줄(머리글)을 확인하고, 나머지를 한 건씩의 기록으로 바꾼다. line = 파일 안 줄 번호(머리글이 1번째 줄)
+function toRecords(rows) {
+  const header = (rows[0] || []).map((v) => v.trim());
+  if (header.join(',') !== COLUMNS.join(',')) {
+    throw new Error('첫 줄이 「' + COLUMNS.join(',') + '」이어야 합니다.');
+  }
+  return rows.slice(1).map((cells, i) => ({
+    orig: i,
+    line: i + 2,
+    name: cells[0] ?? '',
+    buy: cells[1] ?? '',
+    exp: cells[2] ?? '',
+    price: cells[3] ?? '',
+    note: cells[4] ?? '',
+  }));
+}
+
+/* ===== 2. 이름 정리 (RULES 2번) ===== */
+// ① 전각 → 반각 ② 앞뒤 공백 삭제 ③ 연속 공백은 하나로 ④ 영문 소문자
+function cleanName(name) {
+  return name.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/* ===== 날짜 도우미 ===== */
+// YYYY-MM-DD 모양이고, 달력에 있는 날짜이면 true
+function isValidDate(text) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const [y, m, d] = text.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+}
+
+function addDays(dateText, days) {
+  const [y, m, d] = dateText.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+function todayText() {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return now.getFullYear() + '-' + mm + '-' + dd;
+}
+
+/* ===== 3~5. 검사(제외) → 중복 제거 → 정렬 ===== */
+function compareRows(a, b) {
+  if (a.exp !== b.exp) return a.exp < b.exp ? -1 : 1;                       // 유통기한이 이른 순
+  if (a.clean !== b.clean) return a.clean < b.clean ? -1 : 1;               // 정리한 이름의 글자 코드값 순
+  const buyA = a.buyOk ? a.buy : NO_BUY_DATE;
+  const buyB = b.buyOk ? b.buy : NO_BUY_DATE;
+  if (buyA !== buyB) return buyA < buyB ? -1 : 1;                           // 구입일 이른 순(없는 건은 뒤)
+  return a.orig - b.orig;                                                   // 원본 행 순서
+}
+
+function processRecords(records, baseDate) {
+  const from = addDays(baseDate, -DAYS_BEFORE);
+  const to = addDays(baseDate, DAYS_AFTER);
+  const excluded = [];
+  const duplicates = [];
+  const candidates = [];
+
+  // 칸 검사(RULES 4번): 위에서부터 처음 걸린 사유 하나만 기록한다
+  for (const r of records) {
+    r.clean = cleanName(r.name);
+    r.buyOk = isValidDate(r.buy);
+    r.buyBadFormat = r.buy !== '' && !r.buyOk; // 구입일 형식 틀림: 제외하지 않고 표시만 붙인다
+    if (r.clean === '' || r.exp.trim() === '') {
+      excluded.push({ row: r, reason: '필수 빠짐' });
+    } else if (!isValidDate(r.exp)) {
+      excluded.push({ row: r, reason: '형식 틀림' });
+    } else if (r.exp < from || r.exp > to) {
+      excluded.push({ row: r, reason: '범위 밖' });
+    } else {
+      candidates.push(r);
+    }
+  }
+
+  // 중복 제거(RULES 2번): 정리한 이름과 구입일이 같으면 같은 건. 구입일이 없는 건은 대상이 아니다
+  const groups = new Map();
+  for (const r of candidates) {
+    if (!r.buyOk) continue;
+    const key = r.clean + '|' + r.buy;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const dropped = new Set();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    // 유통기한이 가장 이른 한 건을 남기고, 같으면 원본에서 먼저 나온 행을 남긴다
+    group.sort((a, b) => (a.exp === b.exp ? a.orig - b.orig : a.exp < b.exp ? -1 : 1));
+    for (const r of group.slice(1)) {
+      dropped.add(r);
+      duplicates.push({ row: r, keptLine: group[0].line });
+    }
+  }
+  duplicates.sort((a, b) => a.row.orig - b.row.orig);
+
+  const shown = candidates.filter((r) => !dropped.has(r)).sort(compareRows);
+  return { baseDate, from, to, total: records.length, excluded, duplicates, shown };
+}
+
+/* ===== 요약 줄 ===== */
+function summaryText(result) {
+  return '원천 ' + result.total + '건 → 제외 ' + result.excluded.length + ' · 중복 ' + result.duplicates.length +
+    ' → 표시 ' + result.shown.length + '건 · 기준일 ' + result.baseDate + ' · 출처 ' + SOURCE_LABEL;
+}
+
+function checkText(result) {
+  const x = result.excluded.length;
+  const y = result.duplicates.length;
+  const k = result.shown.length;
+  const ok = result.total === x + y + k;
+  return 'N = X + Y + K → ' + result.total + ' = ' + x + ' + ' + y + ' + ' + k + (ok ? ' (맞음)' : ' (맞지 않음)');
+}
+
+/* ===== CSV 내려받기 / 다시 불러와 비교 ===== */
+function csvEscape(value) {
+  return /[",\r\n]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value;
+}
+
+function toCsv(rows) {
+  const lines = rows.map((r) => [r.name, r.buy, r.exp, r.price, r.note].map(csvEscape).join(','));
+  return COLUMNS.join(',') + '\n' + lines.join('\n') + '\n';
+}
+
+function rowKey(r) {
+  return [r.name, r.buy, r.exp, r.price, r.note].join('\u0001');
+}
+
+/* ===== 화면 ===== */
+const state = { records: [], result: null };
+
+function $(id) { return document.getElementById(id); }
+
+function cell(tr, text) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  tr.appendChild(td);
+  return td;
+}
+
+function fillTable(table, head, rows) {
+  table.replaceChildren();
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  for (const h of head) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  const tbody = document.createElement('tbody');
+  for (const values of rows) {
+    const tr = document.createElement('tr');
+    for (const v of values) cell(tr, v);
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+}
+
+function render() {
+  const baseDate = $('baseDate').value;
+  if (!isValidDate(baseDate)) {
+    $('summary').textContent = '기준일을 YYYY-MM-DD 형식의 날짜로 지정하세요.';
+    $('check').textContent = '';
+    return;
+  }
+  const result = processRecords(state.records, baseDate);
+  state.result = result;
+  $('summary').textContent = summaryText(result);
+  $('check').textContent = checkText(result);
+  $('range').textContent = '남는 범위: 유통기한 ' + result.from + ' ~ ' + result.to;
+
+  fillTable($('shown'), ['순서', '줄', '이름', '구입일', '유통기한', '가격', '비고', '표시'],
+    result.shown.map((r, i) => [String(i + 1), String(r.line), r.name, r.buy, r.exp, r.price, r.note,
+      r.buyBadFormat ? '구입일 형식 틀림' : '']));
+  fillTable($('excluded'), ['줄', '이름', '이유', '구입일', '유통기한'],
+    result.excluded.map((e) => [String(e.row.line), e.row.name, e.reason, e.row.buy, e.row.exp]));
+  fillTable($('duplicates'), ['줄', '이름', '이유', '남긴 줄'],
+    result.duplicates.map((d) => [String(d.row.line), d.row.name, '중복', String(d.keptLine)]));
+  $('excludedCount').textContent = String(result.excluded.length);
+  $('duplicatesCount').textContent = String(result.duplicates.length);
+  $('verify').textContent = '';
+}
+
+function downloadResult() {
+  if (!state.result) return;
+  const blob = new Blob(['\uFEFF' + toCsv(state.result.shown)], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'fridge-items-result-' + state.result.baseDate + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 내려받은 CSV를 다시 불러와 지금 화면과 K건·순서가 같은지 본다
+async function checkLoadedFile(file) {
+  const box = $('verify');
+  try {
+    const text = await file.text();
+    const records = toRecords(parseCsv(text));
+    const shown = state.result.shown;
+    // 파일에 적힌 순서 그대로(다시 정렬하지 않고) 지금 화면의 건수·순서와 같은지 비교한다
+    const sameOrder = records.length === shown.length && records.every((r, i) => rowKey(r) === rowKey(shown[i]));
+    // 같은 규칙·같은 기준일로 다시 처리해도 제외·중복이 없고 그대로 남는지도 본다
+    const loaded = processRecords(records, state.result.baseDate);
+    box.textContent = '불러온 파일 ' + records.length + '건 / 파일 순서와 지금 화면 비교: ' +
+      (sameOrder ? '같은 ' + shown.length + '건 · 같은 순서 (맞음)' : '다름 (파일 ' + records.length + '건, 화면 ' + shown.length + '건)') +
+      ' / 같은 규칙으로 다시 처리: ' + summaryText(loaded);
+  } catch (err) {
+    box.textContent = '불러오지 못했습니다: ' + err.message;
+  }
+}
+
+async function start() {
+  $('baseDate').value = todayText(); // 지정하지 않으면 여는 날짜(오늘)
+  $('baseDate').addEventListener('change', render);
+  $('download').addEventListener('click', downloadResult);
+  $('upload').addEventListener('change', (e) => {
+    if (e.target.files[0] && state.result) checkLoadedFile(e.target.files[0]);
+  });
+  try {
+    const res = await fetch(DATA_URL);
+    if (!res.ok) throw new Error('자료 파일을 읽지 못했습니다(' + res.status + ')');
+    state.records = toRecords(parseCsv(await res.text()));
+    render();
+  } catch (err) {
+    $('summary').textContent = '오류: ' + err.message;
+  }
+}
+
+start();
