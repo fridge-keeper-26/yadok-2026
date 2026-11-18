@@ -4,9 +4,47 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>냉장고 식재료 유통기한 알리미 — 주경야독 2026</title>
+<style>
+  body { font-family: "Malgun Gothic", "맑은 고딕", sans-serif; max-width: 960px; margin: 0 auto; padding: 16px; line-height: 1.5; }
+  .summary { font-weight: 700; background: #eef3f7; border-left: 4px solid #2c4a5e; padding: 8px 12px; margin: 12px 0 4px; }
+  .small { color: #4a5560; font-size: 0.9em; margin: 2px 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 12px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px; }
+  th, td { border: 1px solid #b8c0c8; padding: 4px 8px; text-align: left; }
+  th { background: #e6edf2; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; font-weight: 700; }
+</style>
 </head>
 <body>
 <h1>냉장고 식재료 유통기한 알리미</h1>
 <p>사 놓고 잊은 채소·소스를 유통기한 임박 순으로 보는 개인 학습 사이트 · 합성/공개 데이터 사용 · 개인 학습 프로젝트</p>
+
+<div class="controls">
+  <label>기준일 <input type="date" id="baseDate"></label>
+  <button type="button" id="download">결과 CSV 내려받기</button>
+  <label>내려받은 CSV 다시 불러오기 <input type="file" id="upload" accept=".csv,text/csv"></label>
+</div>
+
+<p class="summary" id="summary">불러오는 중…</p>
+<p class="small" id="check"></p>
+<p class="small" id="range"></p>
+<p class="small" id="verify"></p>
+
+<h2>표시되는 식재료 (유통기한 임박 순)</h2>
+<table id="shown"></table>
+
+<details>
+  <summary>제외된 건 (<span id="excludedCount">0</span>건, 이유 포함)</summary>
+  <table id="excluded"></table>
+</details>
+
+<details>
+  <summary>중복으로 빠진 건 (<span id="duplicatesCount">0</span>건)</summary>
+  <table id="duplicates"></table>
+</details>
+
+<noscript>이 페이지는 자바스크립트가 필요합니다.</noscript>
+<script src="app.js"></script>
 </body>
 </html>
