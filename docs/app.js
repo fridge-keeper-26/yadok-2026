@@ -2,15 +2,16 @@
 /*
   냉장고 식재료 유통기한 알리미 — 처리 규칙과 화면 (docs/app.js)
   규칙의 정본은 docs/data/RULES.md 입니다. 이 파일은 그 규칙을 코드로 옮긴 것입니다.
-  처리 순서(RULES 0번): 읽기 → 이름 정리 → 칸 검사(제외) → 중복 제거 → 정렬 → 화면
+  처리 순서(RULES 0번): 읽기 → 이름 정리 → 칸 검사(제외) → 중복 제거 → 보기 조건 → 정렬 → 화면
+  Sprint 3: 「잘못된 줄(제외)」과 「지금은 안 보여 주는 것(보기 조건 밖)」을 나눴다. 요약 줄은 N = X + Y + M, M = B + K (RULES 0번, 1번, 5번)
 */
 
 /* ===== 설정: RULES.md와 같은 값 ===== */
 const DATA_URL = 'data/fridge-items.csv';
 const SOURCE_LABEL = 'fridge-items.csv · 합성 데이터';
 const COLUMNS = ['이름', '구입일', '유통기한', '가격', '비고'];
-const DAYS_BEFORE = 10; // 기준일보다 10일 넘게 이전이면 「범위 밖」
-const DAYS_AFTER = 30;  // 기준일보다 30일 넘게 이후이면 「범위 밖」
+const DAYS_BEFORE = 10; // 기준일보다 10일 넘게 이전이면 「보기 조건 밖」 (RULES 5번)
+const DAYS_AFTER = 30;  // 기준일보다 30일 넘게 이후이면 「보기 조건 밖」 (RULES 5번)
 const NO_BUY_DATE = '9999-99-99'; // 구입일이 없는 건은 정렬에서 맨 뒤
 
 /* ===== 1. 읽기: CSV 글자를 줄과 칸으로 나눈다 ===== */
@@ -94,7 +95,7 @@ function todayText() {
   return now.getFullYear() + '-' + mm + '-' + dd;
 }
 
-/* ===== 3~5. 검사(제외) → 중복 제거 → 정렬 ===== */
+/* ===== 3~6. 검사(제외) → 중복 제거 → 보기 조건 → 정렬 ===== */
 function compareRows(a, b) {
   if (a.exp !== b.exp) return a.exp < b.exp ? -1 : 1;                       // 유통기한이 이른 순
   if (a.clean !== b.clean) return a.clean < b.clean ? -1 : 1;               // 정리한 이름의 글자 코드값 순
@@ -109,6 +110,7 @@ function processRecords(records, baseDate) {
   const to = addDays(baseDate, DAYS_AFTER);
   const excluded = [];
   const duplicates = [];
+  const outOfView = []; // 보기 조건 밖(RULES 5번): 잘못된 줄이 아니라 지금은 안 보여 줄 뿐
   const candidates = [];
 
   // 칸 검사(RULES 4번): 위에서부터 처음 걸린 사유 하나만 기록한다
@@ -120,8 +122,6 @@ function processRecords(records, baseDate) {
       excluded.push({ row: r, reason: '필수 빠짐' });
     } else if (!isValidDate(r.exp)) {
       excluded.push({ row: r, reason: '형식 틀림' });
-    } else if (r.exp < from || r.exp > to) {
-      excluded.push({ row: r, reason: '범위 밖' });
     } else {
       candidates.push(r);
     }
@@ -147,22 +147,34 @@ function processRecords(records, baseDate) {
   }
   duplicates.sort((a, b) => a.row.orig - b.row.orig);
 
-  const shown = candidates.filter((r) => !dropped.has(r)).sort(compareRows);
-  return { baseDate, from, to, total: records.length, excluded, duplicates, shown };
+  // 보기 조건(RULES 5번): 중복에서 남긴 줄에만 적용한다(남긴 줄이 밖이면 그 건은 「보기 조건 밖」)
+  const kept = candidates.filter((r) => !dropped.has(r));
+  for (const r of kept) {
+    if (r.exp < from || r.exp > to) outOfView.push({ row: r, reason: '보기 조건 밖' });
+  }
+  const outSet = new Set(outOfView.map((o) => o.row));
+  const shown = kept.filter((r) => !outSet.has(r)).sort(compareRows);
+  outOfView.sort((a, b) => a.row.orig - b.row.orig);
+  return { baseDate, from, to, total: records.length, excluded, duplicates, outOfView, shown };
 }
 
 /* ===== 요약 줄 ===== */
 function summaryText(result) {
+  const m = result.outOfView.length + result.shown.length;
   return '원천 ' + result.total + '건 → 제외 ' + result.excluded.length + ' · 중복 ' + result.duplicates.length +
-    ' → 표시 ' + result.shown.length + '건 · 기준일 ' + result.baseDate + ' · 출처 ' + SOURCE_LABEL;
+    ' → 냉장고 ' + m + '건(보기 조건 밖 ' + result.outOfView.length + ' · 표시 ' + result.shown.length + ') · 기준일 ' +
+    result.baseDate + ' · 출처 ' + SOURCE_LABEL;
 }
 
 function checkText(result) {
   const x = result.excluded.length;
   const y = result.duplicates.length;
+  const b = result.outOfView.length;
   const k = result.shown.length;
-  const ok = result.total === x + y + k;
-  return 'N = X + Y + K → ' + result.total + ' = ' + x + ' + ' + y + ' + ' + k + (ok ? ' (맞음)' : ' (맞지 않음)');
+  const m = b + k;
+  const ok = result.total === x + y + m;
+  return 'N = X + Y + M, M = B + K → ' + result.total + ' = ' + x + ' + ' + y + ' + ' + m + ', ' + m + ' = ' + b + ' + ' + k +
+    (ok ? ' (맞음)' : ' (맞지 않음)');
 }
 
 /* ===== CSV 내려받기 / 다시 불러와 비교 ===== */
@@ -221,7 +233,7 @@ function render() {
   state.result = result;
   $('summary').textContent = summaryText(result);
   $('check').textContent = checkText(result);
-  $('range').textContent = '남는 범위: 유통기한 ' + result.from + ' ~ ' + result.to;
+  $('range').textContent = '보기 조건: 유통기한 ' + result.from + ' ~ ' + result.to + ' (이 밖은 「보기 조건 밖」으로 접어 둠)';
 
   fillTable($('shown'), ['순서', '줄', '이름', '구입일', '유통기한', '가격', '비고', '표시'],
     result.shown.map((r, i) => [String(i + 1), String(r.line), r.name, r.buy, r.exp, r.price, r.note,
@@ -230,8 +242,11 @@ function render() {
     result.excluded.map((e) => [String(e.row.line), e.row.name, e.reason, e.row.buy, e.row.exp]));
   fillTable($('duplicates'), ['줄', '이름', '이유', '남긴 줄'],
     result.duplicates.map((d) => [String(d.row.line), d.row.name, '중복', String(d.keptLine)]));
+  fillTable($('outOfView'), ['줄', '이름', '이유', '구입일', '유통기한'],
+    result.outOfView.map((o) => [String(o.row.line), o.row.name, o.reason, o.row.buy, o.row.exp]));
   $('excludedCount').textContent = String(result.excluded.length);
   $('duplicatesCount').textContent = String(result.duplicates.length);
+  $('outOfViewCount').textContent = String(result.outOfView.length);
   $('verify').textContent = '';
 }
 
