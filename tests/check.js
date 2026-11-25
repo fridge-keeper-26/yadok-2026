@@ -102,5 +102,10 @@ for (const row of rows) {
 const total = rows.length;
 console.log('검사표 (기준일 ' + baseDate + ') ' + total + '줄 중 통과 ' + passed);
 for (const f of failures) console.log('실패 ' + f.no + '번 줄 · 기대 ' + f.expected + ' · 실제 ' + f.actual + '\n  입력: ' + f.input);
-if (jsonPath) fs.writeFileSync(jsonPath, JSON.stringify({ baseDate, total, passed, failed: failures.map((f) => f.no) }, null, 2) + '\n');
+if (jsonPath) {
+  // 화면에 보여 줄 값: 마지막 갱신 시각(한국 시각), 검사 결과, 판(커밋 앞 7자리, Actions에서만 값이 있음)
+  const updated = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' }).slice(0, 16);
+  const commit = (process.env.GITHUB_SHA || 'local').slice(0, 7);
+  fs.writeFileSync(jsonPath, JSON.stringify({ updated, total, passed, commit, baseDate, failed: failures.map((f) => f.no) }, null, 2) + '\n');
+}
 process.exit(total > 0 && failures.length === 0 ? 0 : 1);
