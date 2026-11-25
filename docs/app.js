@@ -96,7 +96,21 @@ async function checkLoadedFile(file) {
   }
 }
 
+// 예약·배포 때 만들어지는 status.json을 읽어 「마지막 갱신 · 검사 n/N 통과 · 판」을 보여 준다
+async function showStatus() {
+  const box = $('status');
+  try {
+    const res = await fetch('status.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error(String(res.status));
+    const s = await res.json();
+    box.textContent = '마지막 갱신 ' + s.updated + ' · 검사 ' + s.passed + '/' + s.total + ' 통과 · 판 ' + s.commit;
+  } catch (err) {
+    box.textContent = '갱신 정보 없음(배포 전이거나 로컬에서 연 화면입니다)';
+  }
+}
+
 async function start() {
+  showStatus();
   $('baseDate').value = todayText(); // 지정하지 않으면 여는 날짜(오늘)
   $('baseDate').addEventListener('change', render);
   $('download').addEventListener('click', downloadResult);
