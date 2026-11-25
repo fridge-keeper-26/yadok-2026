@@ -1,5 +1,7 @@
 # 검사 → 통과했을 때만 배포. PR에서는 검사만 돈다.
 # 실행 조건 세 가지: main에 병합 · 수동 실행(Run workflow) · 매일 예약(한국 시각 07:17)
+# 순서는 check(채점) → build(사이트 묶음 만들기) → deploy(올리기). 묶음을 만드는 일과 올리는 일을 다른 단계로 나눈 이유:
+# 한 단계 안에서 곧바로 올리면 방금 만든 묶음을 GitHub가 아직 못 찾아 실패하는 일이 있었다(11/25 두 번 확인).
 name: check-deploy
 
 on:
@@ -11,7 +13,7 @@ on:
     - cron: "17 7 * * *"        # 정각을 피해 17분. 한국 시각 매일 아침
       timezone: "Asia/Seoul"
 
-# 기본 권한은 읽기만. 배포 단계에서만 Pages 쓰기 권한을 따로 준다. 이 워크플로에는 키(비밀값)가 없다.
+# 기본 권한은 읽기만. 사이트 쓰기 권한은 build·deploy 단계에서만 따로 준다. 이 워크플로에는 키(비밀값)가 없다.
 permissions:
   contents: read
 
@@ -27,26 +29,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # 검사표 10줄을 돌린다. 기대와 하나라도 다르면 여기서 실패로 끝나고 아래 배포는 돌지 않는다.
+      # 검사표 10줄을 돌린다. 기대와 하나라도 다르면 여기서 실패로 끝나고 아래 build·deploy는 돌지 않는다.
       - name: 검사표 실행
         run: node tests/check.js --json status.json
-      # 화면에 보여 줄 「마지막 갱신 · 검사 n/N 통과 · 판」 값을 배포 단계로 넘긴다.
+      # 화면에 보여 줄 「마지막 갱신 · 검사 n/N 통과 · 판」 값을 다음 단계로 넘긴다.
       - uses: actions/upload-artifact@v4
         with:
           name: status
           path: status.json
 
-  deploy:
+  build:
     needs: check                                   # 검사가 통과해야만 시작한다
-    if: github.event_name != 'pull_request'        # PR에서는 배포하지 않는다
+    if: github.event_name != 'pull_request'        # PR에서는 배포 준비도 하지 않는다
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -57,5 +55,17 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs
+
+  deploy:
+    needs: build                                   # 묶음이 만들어진 뒤에 올린다
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
